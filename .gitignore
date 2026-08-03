@@ -1,0 +1,23 @@
+.env
+.env.*
+!.env.example
+
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pyc
+
+.venv/
+venv/
+
+.vscode/
+.idea/
+
+.DS_Store
+Thumbs.db
+
+*.log
+
+# Keep project data files tracked unless intentionally ignored
+# data/ is intentionally not ignored because it contains demo/offline content
