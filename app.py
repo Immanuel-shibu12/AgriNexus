@@ -4,6 +4,8 @@ AgriSchedule — Smart Crop Calendar & Advisory (MVP / Academic Demo)
 Run with:  streamlit run app.py
 """
 
+import calendar as pycalendar
+import html
 import json
 import os
 import time
@@ -35,6 +37,19 @@ db.init_db()
 OFFLINE_CACHE_DIR = os.path.join(os.path.dirname(__file__), "data", "offline_cache")
 MODEL_DIR = os.path.join(os.path.dirname(__file__), "model")
 os.makedirs(OFFLINE_CACHE_DIR, exist_ok=True)
+
+# Color-codes each crop-stage category consistently wherever it appears
+# (currently: the month-grid calendar on the "My Crop Schedule" page).
+CATEGORY_COLORS = {
+    "sowing": "#22C55E",
+    "transplanting": "#3B82F6",
+    "weeding": "#F59E0B",
+    "fertilizer": "#8B5CF6",
+    "pesticide": "#EF4444",
+    "irrigation": "#06B6D4",
+    "observation": "#9CA3AF",
+    "harvest": "#DC2626",
+}
 
 # ---------------------------------------------------------------------
 # Global theme (card-style panels, rounded widgets — pairs with
@@ -109,6 +124,14 @@ if "mim_history" not in st.session_state:
     st.session_state.mim_history = []
 if "mim_pending_speech" not in st.session_state:
     st.session_state.mim_pending_speech = None
+if "admin_authenticated" not in st.session_state:
+    st.session_state.admin_authenticated = False
+if "admin_name" not in st.session_state:
+    st.session_state.admin_name = ""
+if "admin_cal_offset" not in st.session_state:
+    st.session_state.admin_cal_offset = 0
+if "admin_selected_date" not in st.session_state:
+    st.session_state.admin_selected_date = None
 
 
 # ---------------------------------------------------------------------
@@ -492,6 +515,60 @@ with main_col:
         st.header(t("nav_register", lc))
         crops = db.get_crops()
 
+        # -----------------------------------------------------------
+        # Hero / insights strip, styled after the Zenze-style landing
+        # page reference: eyebrow tag, bold headline, then a row of
+        # quick stats pulled from the live farmer data.
+        # -----------------------------------------------------------
+        _hero_farmers = db.get_all_farmers()
+        _hero_total = len(_hero_farmers)
+        _hero_acres = round(sum(f["field_area"] or 0 for f in _hero_farmers), 1)
+        _hero_crops = len({f["crop"] for f in _hero_farmers if f["crop"]})
+        _hero_locations = len({f["location"] for f in _hero_farmers if f["location"]})
+
+        st.markdown(
+            f"""
+            <div style="
+                background: linear-gradient(135deg, rgba(34,165,89,0.18), rgba(255,255,255,0.02));
+                border: 1px solid rgba(61,168,89,0.35);
+                border-radius: 18px;
+                padding: 1.5rem 1.7rem;
+                margin-bottom: 1.3rem;
+            ">
+                <div style="font-size:0.72rem; letter-spacing:0.12em; text-transform:uppercase;
+                            color:#3DA859; font-weight:700; margin-bottom:0.35rem;">
+                    Smart solutions for a better tomorrow
+                </div>
+                <div style="font-size:1.55rem; font-weight:700; color:#eef1f4; line-height:1.25; margin-bottom:0.25rem;">
+                    Nurturing Fields.<br>Empowering Farmers.
+                </div>
+                <div style="color:#a9b0b8; font-size:0.9rem; margin-bottom:1.1rem; max-width:520px;">
+                    Register a farmer profile to start tracking their crop calendar,
+                    weather advisory and pest guidance in one place.
+                </div>
+                <div style="display:flex; gap:2rem; flex-wrap:wrap;">
+                    <div>
+                        <div style="font-size:1.35rem; font-weight:700; color:#ffffff;">{_hero_total}</div>
+                        <div style="font-size:0.75rem; color:#8b939c;">Farmers registered</div>
+                    </div>
+                    <div>
+                        <div style="font-size:1.35rem; font-weight:700; color:#ffffff;">{_hero_acres}</div>
+                        <div style="font-size:0.75rem; color:#8b939c;">Acres managed</div>
+                    </div>
+                    <div>
+                        <div style="font-size:1.35rem; font-weight:700; color:#ffffff;">{_hero_crops}</div>
+                        <div style="font-size:0.75rem; color:#8b939c;">Crop types tracked</div>
+                    </div>
+                    <div>
+                        <div style="font-size:1.35rem; font-weight:700; color:#ffffff;">{_hero_locations}</div>
+                        <div style="font-size:0.75rem; color:#8b939c;">Locations covered</div>
+                    </div>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
         with st.form("registration_form"):
             col1, col2 = st.columns(2)
             with col1:
@@ -588,21 +665,126 @@ with main_col:
 
             st.markdown("---")
             st.subheader("Full crop calendar")
-            st.dataframe(
-                [
-                    {
-                        "Day": e["day_offset"],
-                        "Date": e["due_date"].strftime("%d %b %Y"),
-                        "Stage": e["stage_name"],
-                        "Category": e["category"],
-                        "Status": e["status"],
-                    }
-                    for e in calendar
-                ],
-                width="stretch", hide_index=True,
+
+            st.markdown(
+                """
+                <style>
+                .cal-grid { display:grid; grid-template-columns:repeat(7,1fr); gap:6px; margin-bottom:0.4rem; }
+                .cal-head {
+                    text-align:center; font-size:0.7rem; text-transform:uppercase;
+                    letter-spacing:0.05em; color:#8b939c; padding-bottom:2px;
+                }
+                .cal-cell {
+                    background: rgba(255,255,255,0.03);
+                    border: 1px solid rgba(255,255,255,0.08);
+                    border-radius: 10px;
+                    min-height: 90px;
+                    padding: 6px;
+                }
+                .cal-cell.other-month { opacity: 0.32; }
+                .cal-cell.is-today { border-color: #3DA859; box-shadow: inset 0 0 0 1px #3DA859; }
+                .cal-daynum { font-size: 0.76rem; color: #c3c9d1; text-align:right; margin-bottom:4px; }
+                .cal-cell.is-today .cal-daynum { color: #3DA859; font-weight:700; }
+                .cal-chip {
+                    font-size: 0.66rem; line-height:1.25; padding: 2px 5px 2px 6px;
+                    border-radius: 5px; margin-bottom: 3px; white-space: nowrap;
+                    overflow: hidden; text-overflow: ellipsis;
+                }
+                .cal-legend-dot {
+                    display:inline-block; width:8px; height:8px; border-radius:50%;
+                    margin-right:5px;
+                }
+                </style>
+                """,
+                unsafe_allow_html=True,
             )
+
+            # Reset the visible month whenever the active farmer changes.
+            if st.session_state.get("sched_cal_farmer") != farmer["id"]:
+                st.session_state.sched_cal_offset = 0
+                st.session_state.sched_cal_farmer = farmer["id"]
+            if "sched_cal_offset" not in st.session_state:
+                st.session_state.sched_cal_offset = 0
+
+            anchor = date.fromisoformat(farmer["sowing_date"])
+            month_index = (anchor.month - 1) + st.session_state.sched_cal_offset
+            view_year = anchor.year + month_index // 12
+            view_month = month_index % 12 + 1
+
+            nav_prev, nav_label, nav_next = st.columns([1, 4, 1])
+            with nav_prev:
+                if st.button("‹", key="sched_cal_prev", width="stretch"):
+                    st.session_state.sched_cal_offset -= 1
+                    st.rerun()
+            with nav_label:
+                st.markdown(
+                    f'<div style="text-align:center; font-weight:700; padding-top:0.3rem;">'
+                    f'{date(view_year, view_month, 1).strftime("%B %Y")}</div>',
+                    unsafe_allow_html=True,
+                )
+            with nav_next:
+                if st.button("›", key="sched_cal_next", width="stretch"):
+                    st.session_state.sched_cal_offset += 1
+                    st.rerun()
+
+            events_by_date = {}
+            for e in calendar:
+                events_by_date.setdefault(e["due_date"], []).append(e)
+
+            today_marker = date.today()
+            weekday_labels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+            cells_html = "".join(f'<div class="cal-head">{wl}</div>' for wl in weekday_labels)
+
+            cal_gen = pycalendar.Calendar(firstweekday=0)
+            for week in cal_gen.monthdatescalendar(view_year, view_month):
+                for day in week:
+                    classes = ["cal-cell"]
+                    if day.month != view_month:
+                        classes.append("other-month")
+                    if day == today_marker:
+                        classes.append("is-today")
+
+                    chips = ""
+                    for ev in events_by_date.get(day, []):
+                        chip_color = CATEGORY_COLORS.get(ev["category"], "#9CA3AF")
+                        chips += (
+                            f'<div class="cal-chip" style="background:{chip_color}26; '
+                            f'color:{chip_color}; border-left:3px solid {chip_color};" '
+                            f'title="{html.escape(ev["stage_name"])}">'
+                            f'{html.escape(ev["stage_name"])}</div>'
+                        )
+
+                    cells_html += (
+                        f'<div class="{" ".join(classes)}">'
+                        f'<div class="cal-daynum">{day.day}</div>{chips}</div>'
+                    )
+
+            st.markdown(f'<div class="cal-grid">{cells_html}</div>', unsafe_allow_html=True)
+
+            legend_bits = "".join(
+                f'<span style="margin-right:14px; font-size:0.75rem; color:#c3c9d1;">'
+                f'<span class="cal-legend-dot" style="background:{color};"></span>{cat.capitalize()}</span>'
+                for cat, color in CATEGORY_COLORS.items()
+            )
+            st.markdown(f'<div style="margin:0.6rem 0 1rem 0;">{legend_bits}</div>', unsafe_allow_html=True)
+
+            with st.expander("View as a simple table"):
+                st.dataframe(
+                    [
+                        {
+                            "Day": e["day_offset"],
+                            "Date": e["due_date"].strftime("%d %b %Y"),
+                            "Stage": e["stage_name"],
+                            "Category": e["category"],
+                            "Status": e["status"],
+                        }
+                        for e in calendar
+                    ],
+                    width="stretch", hide_index=True,
+                )
+
             st.caption(
-                "This full calendar view is what stays available **offline** — it's cached to "
+                "This calendar's data stays available **offline** — it's cached to "
                 "`data/offline_cache/` on registration/first load, so a farmer with previously "
                 "downloaded schedules can still check tasks without a live connection."
             )
@@ -740,12 +922,295 @@ with main_col:
     # PAGE: Admin (internal — registered farmers dataset view)
     # -------------------------------------------------------------
     elif page == "Admin":
-        st.header("Admin")
-        st.caption("Internal view of all registered farmer records.")
-        if farmers:
-            st.dataframe(
-                [{k: f[k] for k in ("id", "name", "phone", "location", "crop", "variety", "field_area", "sowing_date")} for f in farmers],
-                width="stretch", hide_index=True,
+        # -----------------------------------------------------------
+        # Light theme for the whole Admin section (login screen and
+        # dashboard alike) — scoped to this branch only, since the CSS
+        # is only injected while this page is being rendered, so it
+        # never leaks onto the other (dark-themed) pages of the app.
+        # -----------------------------------------------------------
+        st.markdown(
+            """
+            <style>
+            [data-testid="stAppViewContainer"] .main .block-container {
+                background: #F3F4F6;
+                border-radius: 20px;
+                padding: 1.4rem 1.7rem 2rem 1.7rem;
+            }
+            [data-testid="stAppViewContainer"] .main h1,
+            [data-testid="stAppViewContainer"] .main h2,
+            [data-testid="stAppViewContainer"] .main h3,
+            [data-testid="stAppViewContainer"] .main p,
+            [data-testid="stAppViewContainer"] .main label,
+            [data-testid="stAppViewContainer"] .main span {
+                color: #111827;
+            }
+            [data-testid="stAppViewContainer"] .main div[data-testid="stVerticalBlockBorderWrapper"] {
+                background: #ffffff !important;
+                border-color: rgba(17,24,39,0.08) !important;
+            }
+            .admin-card {
+                background: #ffffff;
+                border-radius: 18px;
+                padding: 1.1rem 1.3rem;
+                box-shadow: 0 2px 10px rgba(17,24,39,0.06);
+                border: 1px solid rgba(17,24,39,0.06);
+                margin-bottom: 1rem;
+            }
+            .admin-card, .admin-card * { color: #111827 !important; }
+            .admin-muted { color: #6b7280 !important; font-size: 0.78rem; }
+            .admin-stat-value { font-size: 1.5rem; font-weight: 700; color: #111827 !important; }
+            .admin-greet-bar {
+                background: #111827;
+                border-radius: 18px;
+                padding: 1.1rem 1.4rem;
+                margin-bottom: 1rem;
+            }
+            .admin-greet-bar, .admin-greet-bar * { color: #ffffff !important; }
+            .admin-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+            .admin-table th {
+                text-align: left; color: #6b7280 !important; font-size: 0.7rem;
+                text-transform: uppercase; letter-spacing: 0.05em;
+                padding: 0.5rem 0.5rem; border-bottom: 1px solid #E5E7EB;
+            }
+            .admin-table td {
+                padding: 0.55rem 0.5rem; color: #111827 !important;
+                border-bottom: 1px solid #F0F1F3;
+            }
+            .admin-login-card {
+                max-width: 380px;
+                margin: 2.5rem auto 0 auto;
+                background: #ffffff;
+                border-radius: 20px;
+                padding: 2rem 2rem 0.5rem 2rem;
+                box-shadow: 0 10px 30px rgba(0,0,0,0.35);
+                text-align: center;
+            }
+            .admin-login-card h2 { color: #111827 !important; margin-bottom: 0.2rem; }
+            .admin-login-card p { color: #6b7280 !important; font-size: 0.85rem; margin-bottom: 0.4rem; }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        # -----------------------------------------------------------
+        # Gate: name + fixed demo passcode ("0000"). This is a demo
+        # separator for the internal view only, not real authentication.
+        # -----------------------------------------------------------
+        if not st.session_state.admin_authenticated:
+            st.markdown(
+                """
+                <div class="admin-login-card">
+                    <h2>Admin sign in</h2>
+                    <p>Internal view — enter your name and the admin passcode.</p>
+                </div>
+                """,
+                unsafe_allow_html=True,
             )
+            _, login_col, _ = st.columns([1, 1.2, 1])
+            with login_col:
+                login_card = st.container(border=True)
+                with login_card:
+                    with st.form("admin_login_form"):
+                        admin_name_input = st.text_input("Name")
+                        admin_password_input = st.text_input("Password", type="password", placeholder="••••")
+                        login_submitted = st.form_submit_button(
+                            "Sign in", width="stretch", type="primary"
+                        )
+                        if login_submitted:
+                            if not admin_name_input.strip():
+                                st.error("Please enter your name.")
+                            elif admin_password_input != "0000":
+                                st.error("Incorrect password.")
+                            else:
+                                st.session_state.admin_authenticated = True
+                                st.session_state.admin_name = admin_name_input.strip()
+                                st.rerun()
+
+        # -----------------------------------------------------------
+        # Dashboard — light theme styled after the reference dashboard:
+        # greeting bar, stat cards, farmer table on the left; a sowing
+        # calendar on the right. All CSS/markup here is only injected
+        # while this branch runs, so it never leaks onto the other
+        # (dark-themed) pages of the app.
+        # -----------------------------------------------------------
         else:
-            st.info("No farmers registered yet.")
+            top_l, top_r = st.columns([4, 1])
+            with top_l:
+                st.markdown(
+                    f"""
+                    <div class="admin-greet-bar">
+                        <div style="font-size:1.2rem; font-weight:700;">Hello, {html.escape(st.session_state.admin_name)}! 👋</div>
+                        <div style="font-size:0.85rem; opacity:0.75;">Here's what's happening across your farmer network.</div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+            with top_r:
+                st.write("")
+                if st.button("Log out", width="stretch"):
+                    st.session_state.admin_authenticated = False
+                    st.rerun()
+
+            all_farmers = farmers or []
+            search_term = st.text_input("🔍 Search farmers by name, crop or location", key="admin_search")
+            search_term = (search_term or "").strip().lower()
+            if search_term:
+                filtered_farmers = [
+                    f for f in all_farmers
+                    if search_term in (f["name"] or "").lower()
+                    or search_term in (f["crop"] or "").lower()
+                    or search_term in (f["location"] or "").lower()
+                ]
+            else:
+                filtered_farmers = all_farmers
+
+            total_farmers = len(all_farmers)
+            total_acres = round(sum(f["field_area"] or 0 for f in all_farmers), 1)
+            crop_types = len({f["crop"] for f in all_farmers if f["crop"]})
+            locations = len({f["location"] for f in all_farmers if f["location"]})
+
+            dash_col, cal_col = st.columns([2, 1], gap="large")
+
+            # ---------------- left: stats + farmer records ----------------
+            with dash_col:
+                st.markdown('<div class="admin-muted">OVERVIEW</div>', unsafe_allow_html=True)
+                s1, s2, s3, s4 = st.columns(4)
+                for cell, label, value in (
+                    (s1, "Farmers", total_farmers),
+                    (s2, "Acres managed", total_acres),
+                    (s3, "Crop types", crop_types),
+                    (s4, "Locations", locations),
+                ):
+                    with cell:
+                        st.markdown(
+                            f"""<div class="admin-card" style="text-align:center; margin-bottom:0.8rem;">
+                                    <div class="admin-stat-value">{value}</div>
+                                    <div class="admin-muted">{label}</div>
+                                </div>""",
+                            unsafe_allow_html=True,
+                        )
+
+                st.markdown('<div class="admin-muted" style="margin:0.6rem 0 0.4rem 0;">FARMER RECORDS</div>', unsafe_allow_html=True)
+                if filtered_farmers:
+                    rows_html = "".join(
+                        "<tr>"
+                        f"<td>{f['id']}</td>"
+                        f"<td>{html.escape(f['name'] or '')}</td>"
+                        f"<td>{html.escape(f.get('phone') or '—')}</td>"
+                        f"<td>{html.escape(f['location'] or '')}</td>"
+                        f"<td>{html.escape(f['crop'] or '')}</td>"
+                        f"<td>{html.escape(f['variety'] or '')}</td>"
+                        f"<td>{f['field_area']}</td>"
+                        f"<td>{f['sowing_date']}</td>"
+                        "</tr>"
+                        for f in filtered_farmers
+                    )
+                    st.markdown(
+                        f"""
+                        <div class="admin-card" style="padding:0.5rem 0.7rem; overflow-x:auto;">
+                        <table class="admin-table">
+                            <thead>
+                                <tr>
+                                    <th>ID</th><th>Name</th><th>Phone</th><th>Location</th>
+                                    <th>Crop</th><th>Variety</th><th>Area (ac)</th><th>Sowing date</th>
+                                </tr>
+                            </thead>
+                            <tbody>{rows_html}</tbody>
+                        </table>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    st.markdown('<div class="admin-card">No matching farmer records.</div>', unsafe_allow_html=True)
+
+            # ---------------- right: sowing calendar panel ----------------
+            with cal_col:
+                st.markdown('<div class="admin-card">', unsafe_allow_html=True)
+                st.markdown(
+                    '<div style="font-weight:700; font-size:1.05rem; margin-bottom:0.15rem;">Sowing calendar</div>'
+                    '<div class="admin-muted" style="margin-bottom:0.6rem;">Pick a date to see who sowed that day</div>',
+                    unsafe_allow_html=True,
+                )
+
+                today = date.today()
+                month_index = (today.month - 1) + st.session_state.admin_cal_offset
+                view_year = today.year + month_index // 12
+                view_month = month_index % 12 + 1
+
+                nav_prev, nav_label, nav_next = st.columns([1, 3, 1])
+                with nav_prev:
+                    if st.button("‹", key="admin_cal_prev", width="stretch"):
+                        st.session_state.admin_cal_offset -= 1
+                        st.rerun()
+                with nav_label:
+                    st.markdown(
+                        f'<div style="text-align:center; font-weight:600; padding-top:0.4rem;">'
+                        f'{date(view_year, view_month, 1).strftime("%B %Y")}</div>',
+                        unsafe_allow_html=True,
+                    )
+                with nav_next:
+                    if st.button("›", key="admin_cal_next", width="stretch"):
+                        st.session_state.admin_cal_offset += 1
+                        st.rerun()
+
+                sow_dates = set()
+                for f in all_farmers:
+                    try:
+                        sow_dates.add(date.fromisoformat(f["sowing_date"]))
+                    except (TypeError, ValueError):
+                        pass
+
+                weekday_cols = st.columns(7)
+                for wc, wlabel in zip(weekday_cols, ["S", "M", "T", "W", "T", "F", "S"]):
+                    wc.markdown(f'<div class="admin-muted" style="text-align:center;">{wlabel}</div>', unsafe_allow_html=True)
+
+                cal = pycalendar.Calendar(firstweekday=6)
+                for week in cal.monthdatescalendar(view_year, view_month):
+                    week_cols = st.columns(7)
+                    for wc, day in zip(week_cols, week):
+                        in_month = day.month == view_month
+                        has_sowing = day in sow_dates and in_month
+                        is_selected = st.session_state.admin_selected_date == day
+                        with wc:
+                            if st.button(
+                                str(day.day),
+                                key=f"admin_cal_{day.isoformat()}",
+                                width="stretch",
+                                type="primary" if is_selected else "secondary",
+                                disabled=not in_month,
+                            ):
+                                st.session_state.admin_selected_date = day
+                                st.rerun()
+                            if has_sowing:
+                                st.markdown(
+                                    '<div style="text-align:center; margin-top:-0.55rem;">'
+                                    '<span style="display:inline-block; width:5px; height:5px; '
+                                    'border-radius:50%; background:#22C55E;"></span></div>',
+                                    unsafe_allow_html=True,
+                                )
+
+                st.markdown(
+                    '<div class="admin-muted" style="margin-top:0.5rem;">'
+                    '<span style="color:#22C55E;">●</span> has sowing activity</div>',
+                    unsafe_allow_html=True,
+                )
+
+                if st.session_state.admin_selected_date:
+                    sel = st.session_state.admin_selected_date
+                    st.markdown(
+                        f'<div style="margin-top:0.9rem; font-weight:600;">Sowed on {sel.strftime("%d %b %Y")}</div>',
+                        unsafe_allow_html=True,
+                    )
+                    matches = [f for f in all_farmers if f["sowing_date"] == sel.isoformat()]
+                    if matches:
+                        for m in matches:
+                            st.markdown(
+                                f'<div class="admin-muted">🌱 {html.escape(m["name"])} — '
+                                f'{html.escape(m["crop"] or "")} ({html.escape(m["location"] or "")})</div>',
+                                unsafe_allow_html=True,
+                            )
+                    else:
+                        st.markdown('<div class="admin-muted">No farmers sowed on this date.</div>', unsafe_allow_html=True)
+
+                st.markdown('</div>', unsafe_allow_html=True)

@@ -45,6 +45,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS farmers (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
+            phone TEXT,
             location TEXT NOT NULL,
             latitude REAL,
             longitude REAL,
@@ -70,6 +71,13 @@ def init_db():
     """)
 
     conn.commit()
+
+    # ---- migration: add `phone` to any farmers table created before this
+    # column existed, so existing agrischedule.db files don't break. ----
+    existing_cols = {row["name"] for row in cur.execute("PRAGMA table_info(farmers)").fetchall()}
+    if "phone" not in existing_cols:
+        cur.execute("ALTER TABLE farmers ADD COLUMN phone TEXT")
+        conn.commit()
 
     # Seed default crop schedules only if table is empty
     cur.execute("SELECT COUNT(*) as c FROM crop_stages")
@@ -194,13 +202,13 @@ def delete_crop_stage(stage_id):
 # Farmer helpers
 # ---------------------------------------------------------------------
 
-def add_farmer(name, location, latitude, longitude, crop, variety, field_area, sowing_date, language="en"):
+def add_farmer(name, phone, location, latitude, longitude, crop, variety, field_area, sowing_date, language="en"):
     conn = get_conn()
     cur = conn.execute(
         """INSERT INTO farmers
-           (name, location, latitude, longitude, crop, variety, field_area, sowing_date, language, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (name, location, latitude, longitude, crop, variety, field_area,
+           (name, phone, location, latitude, longitude, crop, variety, field_area, sowing_date, language, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (name, phone, location, latitude, longitude, crop, variety, field_area,
          sowing_date, language, datetime.now().isoformat()),
     )
     conn.commit()
